@@ -1,7 +1,7 @@
 """Thin async client for the host-side speech-to-text service
 (speech-service/), reached the same way as Ollama: host.docker.internal,
 because it needs to run outside Docker for GPU access. See
-scripts/run-speech-service.ps1.
+run.ps1|sh -SpeechServiceOnly (repo root).
 """
 
 from __future__ import annotations
@@ -64,5 +64,5 @@ async def transcribe(audio_bytes: bytes, filename: str, content_type: str) -> st
         # running (it's manually started, not managed by docker compose) —
         # worth a specific, actionable message rather than a generic one.
         raise SpeechError(
-            "Speech service isn't reachable — start it with scripts/run-speech-service.ps1"
+            "Speech service isn't reachable — start it with ./run.ps1 or ./run.sh (see README)"
         ) from exc

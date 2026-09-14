@@ -31,12 +31,17 @@ in Docker, fronted by an `nginx` HTTPS reverse proxy — see [Run](#run) below.
 ```
 
 `nginx` fronts `frontend` + `backend` with HTTPS and is the app's only
-published entrypoint (`frontend` doesn't publish a host port at all). One
-more piece sits on top of this core, off by default:
+published entrypoint (`frontend` doesn't publish a host port at all). Every
+service has `restart: unless-stopped`, so once it's up it survives reboots
+and Docker restarts on its own — this is meant to be left running like a
+small personal server, not started by hand each time. One more piece sits
+on top of this core, off by default:
 
 - **speech-service** (`speech-service/`) — host-side speech-to-text for the
   chat tab's mic button. Not Dockerized (GPU access), not required for the
-  app to work. If it isn't running, the mic button just disables itself.
+  app to work. If it isn't running, the mic button just disables itself. Can
+  optionally be registered to start automatically at login (Windows) or
+  boot (Linux/Mac) too — see [Run](#run) below.
 
 ## Prerequisites
 
@@ -45,98 +50,81 @@ more piece sits on top of this core, off by default:
    <https://ollama.com/download>
 3. Copy `.env.example` to `.env` and configure it — at minimum look at
    `DOMAIN_NAME` (for the HTTPS cert) and `OLLAMA_BASE_URL` (if Ollama isn't
-   on the default host/port). This is required, not optional: the run
-   script (below) fails fast if `.env` doesn't exist yet, rather than
+   on the default host/port). This is required, not optional: `run.ps1`/
+   `run.sh` (below) fails fast if `.env` doesn't exist yet, rather than
    silently defaulting it for you.
 
    ```bash
    cp .env.example .env
    ```
 
-Models are pulled automatically by `./scripts/run.ps1`/`run.sh` (below) —
-whichever of `OLLAMA_LLM_MODEL`, `OLLAMA_VISION_MODEL`, `OLLAMA_EMBED_MODEL`,
-`OLLAMA_EXTRACT_MODEL` are set in `.env` (defaults: `qwen2.5:14b`,
-`qwen2.5vl:7b`, `bge-large`) get pulled if they aren't already present. To
-just pull them without doing anything else, e.g. to pre-warm before your
-first run:
-
-```powershell
-# PowerShell
-./scripts/pull-models.ps1
-```
-
-```bash
-# bash
-./scripts/pull-models.sh
-```
-
 ## Run
 
-### Quick start
+Everything — dependency checks, model pulling, HTTPS cert, voice input,
+build, start — is one script, at the repo root (no `scripts/` directory;
+this used to be four separate scripts, now it's all inline in one file per
+platform):
 
 ```powershell
 # PowerShell
-./scripts/run.ps1
+./run.ps1
 ```
 
 ```bash
 # bash
-./scripts/run.sh
+./run.sh
 ```
 
-Checks Docker is installed and running, requires `.env` to already exist
-(fails with instructions if not — see [Prerequisites](#prerequisites)),
-pulls whichever configured Ollama models aren't already installed,
-generates the HTTPS cert if needed, asks whether to start the optional
-speech service (in the background — see below, not a visible window),
-then builds and starts everything. Safe to re-run any time — every step
-is a no-op if it already happened (existing models/cert are detected and
-skipped). Pass `-Force`/`--force` to rotate the HTTPS cert even if a valid
-one exists.
+Safe to re-run any time — every step is a no-op if it already happened
+(existing models/cert are detected and skipped). What it does, in order:
 
-The rest of this section is what that script automates, spelled out for
-manual use, and to explain what each piece is actually doing.
+1. **Docker** — checks it's installed *and actually running* (not just on
+   PATH), and that the compose plugin is available.
+2. **`.env`** — fails with instructions if it doesn't exist yet (see
+   [Prerequisites](#prerequisites)). Everything past this point reads
+   settings from it.
+3. **Ollama models** — pulls whichever of `OLLAMA_LLM_MODEL`,
+   `OLLAMA_VISION_MODEL`, `OLLAMA_EMBED_MODEL`, `OLLAMA_EXTRACT_MODEL` (from
+   `.env`, default `qwen2.5:14b` / `qwen2.5vl:7b` / `bge-large` / unset)
+   aren't already installed (checked via `ollama list`).
+4. **HTTPS cert** — self-signed, for `DOMAIN_NAME` (defaults to
+   `localhost`; set `HTTP_PORT`/`HTTPS_PORT` too if 80/443 are already
+   taken on your host — common on Windows, IIS/Skype/VMware often grab
+   443). Generated inside a throwaway Docker container (`alpine` + openssl,
+   removed immediately after) — nothing extra to install on the host.
+   Written to `./certs/`, reused on every future run; pass `-Force`/
+   `--force` to rotate it (e.g. after changing `DOMAIN_NAME`). It's
+   self-signed, not Let's Encrypt — there's no public DNS record for this
+   app to satisfy an ACME challenge against, by design (see
+   [Notes / next steps](#notes--next-steps)). Your browser will warn until
+   you import `./certs/fullchain.pem` yourself or click through the
+   warning. If browser uploads should go over HTTPS too (they bypass the
+   Next.js proxy straight to the backend — see `NEXT_PUBLIC_BACKEND_URL`
+   comments in `.env.example`), set
+   `NEXT_PUBLIC_BACKEND_URL=https://<DOMAIN_NAME>/backend` (append
+   `:<HTTPS_PORT>` if you changed it from 443) in `.env` before building.
+5. **Voice input** — asks:
+   ```
+   [N] No (default) - the mic button stays disabled
+   [Y] Yes, start it now (background, until you reboot/log out)
+   [B] Yes, start it now AND register it to start automatically every time you log in
+   ```
+   `Y`/`B` launch it detached (no visible window), logging to
+   `speech-service/speech-service.log` (and `.err.log` on Windows) — tail
+   that for startup progress (first run downloads the Whisper model) or to
+   diagnose a problem. `B` additionally registers it to start on its own
+   going forward: a Task Scheduler entry on Windows (`Register-ScheduledTask`,
+   trigger "at log on" — not literally at system boot before login), or a
+   `crontab -e` `@reboot` entry on Linux/Mac (genuinely at boot). To remove
+   that registration later: `./run.ps1 -RemoveSpeechServiceStartup` /
+   `./run.sh --remove-speech-service-startup` (or do it manually — Task
+   Scheduler, find `DocstoreSpeechService`, delete it; `crontab -e`, delete
+   the line mentioning `run.sh`). If you never plan to use voice input,
+   there's nothing to turn off — just answer `N` (or hit enter) and don't be
+   surprised the mic button stays disabled.
+6. **Build + start** — `docker compose up --build -d`.
 
-### 1. Generate the HTTPS cert (required first step)
-
-`nginx` is the app's only entrypoint and it won't start without a cert to
-terminate TLS with, so this has to happen before the first `docker compose
-up` — after that it's a no-op on every subsequent run (see step 3).
-
-- In `.env` (see [Prerequisites](#prerequisites)), `DOMAIN_NAME` (defaults
-  to `localhost`) becomes the cert's subject and nginx's `server_name`. Use
-  a LAN hostname if other devices need access, e.g. `DOMAIN_NAME=docstore.home`.
-- If 80/443 are already taken on your host (common on Windows — IIS, Skype,
-  VMware, etc. often grab 443), also set `HTTP_PORT`/`HTTPS_PORT` in `.env`
-  to something free, e.g. `HTTPS_PORT=8443`.
-- Generate the cert (written to `./certs/`, bind-mounted read-only into the
-  `nginx` container). This runs openssl inside a throwaway Docker container,
-  not on your host — nothing extra to install beyond Docker itself:
-
-  ```powershell
-  # PowerShell
-  ./scripts/generate-certs.ps1
-  ```
-
-  ```bash
-  # bash
-  ./scripts/generate-certs.sh
-  ```
-
-  It's self-signed, not Let's Encrypt — there's no public DNS record for
-  this app to satisfy an ACME challenge against, by design (see
-  [Notes / next steps](#notes--next-steps)). Your browser will warn until
-  you import `./certs/fullchain.pem` yourself or click through the warning.
-- If browser uploads should go over HTTPS too (they bypass the Next.js
-  proxy straight to the backend — see `NEXT_PUBLIC_BACKEND_URL` comments in
-  `.env.example`), set `NEXT_PUBLIC_BACKEND_URL=https://<DOMAIN_NAME>/backend`
-  (append `:<HTTPS_PORT>` if you changed it from 443) in `.env` before building.
-
-### 2. Start everything
-
-```bash
-docker compose up --build
-```
+Once it's up:
 
 - App: `https://<DOMAIN_NAME>/` (`https://localhost/` with the defaults).
   `http://` on `HTTP_PORT` redirects to HTTPS automatically.
@@ -151,60 +139,26 @@ docker compose up --build
   are the only ports exposed to the host. Need a GUI client against
   Postgres? Temporarily add a `ports: ["5432:5432"]` line to `db`, or
   `docker compose exec db psql -U docstore`.
-- The chat tab's mic button will be visible but disabled (grayed out, with a
-  tooltip) — that's expected, see below.
 
-### 3. Re-running later
+### Running the speech service standalone
 
-The generated cert is reused automatically — `docker compose up` (no
-`generate-certs` step needed) works from here on, including after a reboot.
-Only re-run `generate-certs` if you change `DOMAIN_NAME`, want to rotate the
-cert, or pass `--force`/`-Force`.
+`run.ps1 -SpeechServiceOnly` / `run.sh --speech-service-only` runs just the
+speech service in the foreground (no dependency checks, no Docker) — this
+is what the background launch and the login/boot registration both actually
+invoke under the hood; run it directly yourself if you'd rather watch its
+output live in its own terminal instead of tailing the log file. First
+time, install its dependencies into whatever Python environment you'll run
+it with: `pip install -r speech-service/requirements.txt`. Optional: run
+`speech-service/smoke_test.py` first to check whether your GPU actually
+works with faster-whisper (Blackwell GPUs currently fall back to CPU — see
+comments in `speech-service/server.py`); a `small` model transcribing a
+short clip on CPU is still just a few seconds.
 
-### With voice input
-
-The mic button in the chat tab talks to `speech-service/`, a small
-faster-whisper server. It's deliberately **not** part of `docker compose` —
-it needs GPU access without fighting Docker GPU passthrough, the same
-reason Ollama runs on the host instead of in a container.
-
-1. First time: `pip install -r speech-service/requirements.txt` into
-   whatever Python environment you'll run it with.
-2. Start it alongside `docker compose up` (once, or any time you want voice
-   input available) — `./scripts/run.ps1`/`run.sh` already offer to do this
-   for you in the background; to run it yourself instead (e.g. in its own
-   terminal, so you can watch its logs directly):
-
-   ```powershell
-   # PowerShell
-   ./scripts/run-speech-service.ps1
-   ```
-
-   ```bash
-   # bash
-   ./scripts/run-speech-service.sh
-   ```
-
-   First run downloads the `small` Whisper model. It binds `0.0.0.0:8090` —
-   the backend reaches it at `host.docker.internal:8090` (configurable via
-   `SPEECH_BASE_URL` in `.env`). When `run.ps1`/`run.sh` starts it for you
-   instead, it runs detached/hidden rather than in a visible window, with
-   its output going to `speech-service/speech-service.log` (and
-   `speech-service.err.log` on Windows) — tail that if you want to watch
-   startup progress or diagnose a problem.
-3. That's it — no rebuild needed. The backend polls `GET /health` on the
-   speech service every time the frontend asks `GET /speech/status` (which
-   the chat tab does on load and every 30s), and the mic button
-   enables/disables itself accordingly. Stop the service and the button
-   disables itself again within ~30s; no restart of `docker compose`
-   required either way.
-4. Optional: run `speech-service/smoke_test.py` first to check whether your
-   GPU actually works with faster-whisper (Blackwell GPUs currently fall
-   back to CPU — see comments in `speech-service/server.py`); a `small`
-   model transcribing a short clip on CPU is still just a few seconds.
-
-If you never plan to use voice input, there's nothing to turn off — just
-don't run the script, and don't be surprised the mic button stays disabled.
+The backend polls `GET /health` on the speech service every time the
+frontend asks `GET /speech/status` (which the chat tab does on load and
+every 30s), and the mic button enables/disables itself accordingly — stop
+the service and the button disables itself again within ~30s, no restart of
+`docker compose` required either way.
 
 ### Postgres bind mount on Windows
 
@@ -269,6 +223,8 @@ text is appended to (not sent instead of) whatever's already typed. `GET
 ## Project layout
 
 ```
+run.ps1             # one-command setup + launch (PowerShell) - see Run
+run.sh              # same, bash
 docker-compose.yml
 .env.example
 db/init/            # creates the vector extension on first boot
@@ -291,8 +247,6 @@ frontend/
 speech-service/     # optional host-side speech-to-text (faster-whisper)
 nginx/templates/    # HTTPS reverse-proxy config (envsubst template)
 certs/              # self-signed TLS cert/key, generated locally, gitignored
-scripts/            # run.ps1 (one-command setup), model pull, speech-service
-                    # launch, cert generation helpers
 ```
 
 ## Notes / next steps

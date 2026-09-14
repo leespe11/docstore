@@ -2,8 +2,8 @@
 Dockerized) so it can use the GPU without fighting Docker GPU passthrough on
 Windows — the same reason Ollama runs on the host in this project. Reached
 from the backend container via host.docker.internal. See
-scripts/run-speech-service.ps1 to start it and speech-service/smoke_test.py
-to check GPU vs CPU support first.
+run.ps1|sh -SpeechServiceOnly (repo root) to start it and
+speech-service/smoke_test.py to check GPU vs CPU support first.
 """
 
 from __future__ import annotations
