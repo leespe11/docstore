@@ -56,29 +56,60 @@ fi
 echo "Docker OK."
 
 # ---------------------------------------------------------------------------
-# 2. Ollama
+# 2. .env — required up front (not auto-created): the model-pull step below
+# and the HTTPS cert both read settings from it, so a silently-defaulted
+# .env would mean pulling the wrong models or minting a cert for the wrong
+# domain without you noticing.
+
+step "Checking for .env"
+if [ ! -f .env ]; then
+  fail ".env not found. Copy .env.example to .env and configure it (at least DOMAIN_NAME, and OLLAMA_BASE_URL if Ollama isn't on the default port), then re-run this script."
+  exit 1
+fi
+echo ".env found."
+
+# ---------------------------------------------------------------------------
+# 3. Ollama — installed, and every model this app is configured to use
+# (per .env, falling back to backend/app/config.py's defaults) actually
+# pulled. Mirrors scripts/pull-models.sh rather than shelling out to it,
+# since it needs to skip models that are already present instead of always
+# re-pulling.
 
 step "Checking for Ollama"
 if ! command -v ollama >/dev/null 2>&1; then
-  fail "Ollama not found on PATH. Install it (needed for the LLMs this app calls out to): https://ollama.com/download — then ./scripts/pull-models.sh"
+  fail "Ollama not found on PATH. Install it (needed for the LLMs this app calls out to): https://ollama.com/download"
   exit 1
 fi
 echo "Ollama OK."
 
-# ---------------------------------------------------------------------------
-# 3. .env
+llm_model="$(env_value OLLAMA_LLM_MODEL qwen2.5:14b)"
+vision_model="$(env_value OLLAMA_VISION_MODEL qwen2.5vl:7b)"
+embed_model="$(env_value OLLAMA_EMBED_MODEL bge-large)"
+extract_model="$(env_value OLLAMA_EXTRACT_MODEL "")"
 
-step "Checking for .env"
-if [ ! -f .env ]; then
-  if [ ! -f .env.example ]; then
-    fail ".env.example is missing — can't create a default .env from it."
-    exit 1
-  fi
-  cp .env.example .env
-  echo "Created .env from .env.example (defaults: DOMAIN_NAME=localhost, HTTPS_PORT=443). Edit it any time — re-run this script to pick up changes."
-else
-  echo ".env already exists, leaving it as-is."
+needed_models=("$llm_model" "$vision_model" "$embed_model")
+if [ -n "$extract_model" ] && [ "$extract_model" != "$llm_model" ]; then
+  needed_models+=("$extract_model")
 fi
+
+# `ollama list` shows an explicit :latest tag even for models pulled
+# without one (e.g. "bge-large" pulls as "bge-large:latest") - strip that
+# suffix on both sides before comparing so an untagged config value still
+# matches an already-pulled model.
+installed_models="$(ollama list | tail -n +2 | awk '{print $1}' | sed 's/:latest$//')"
+
+for m in "${needed_models[@]}"; do
+  m_norm="${m%:latest}"
+  if grep -Fxq "$m_norm" <<<"$installed_models"; then
+    echo "$m already installed."
+  else
+    echo "Pulling $m (not installed yet)..."
+    if ! ollama pull "$m"; then
+      fail "ollama pull $m failed (see above)."
+      exit 1
+    fi
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # 4. HTTPS cert

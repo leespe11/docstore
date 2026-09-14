@@ -43,20 +43,32 @@ more piece sits on top of this core, off by default:
 1. **Docker Desktop** (Windows/Mac) or Docker Engine + compose plugin (Linux).
 2. **Ollama** installed and running on the host with GPU support:
    <https://ollama.com/download>
-3. Pull the models (once):
-
-   ```powershell
-   # PowerShell
-   ./scripts/pull-models.ps1
-   ```
+3. Copy `.env.example` to `.env` and configure it — at minimum look at
+   `DOMAIN_NAME` (for the HTTPS cert) and `OLLAMA_BASE_URL` (if Ollama isn't
+   on the default host/port). This is required, not optional: the run
+   script (below) fails fast if `.env` doesn't exist yet, rather than
+   silently defaulting it for you.
 
    ```bash
-   # bash
-   ./scripts/pull-models.sh
+   cp .env.example .env
    ```
 
-   That pulls `qwen2.5:14b`, `qwen2.5vl:7b`, and `bge-large`
-   (`bge-large-en-v1.5`, 1024-dim).
+Models are pulled automatically by `./scripts/run.ps1`/`run.sh` (below) —
+whichever of `OLLAMA_LLM_MODEL`, `OLLAMA_VISION_MODEL`, `OLLAMA_EMBED_MODEL`,
+`OLLAMA_EXTRACT_MODEL` are set in `.env` (defaults: `qwen2.5:14b`,
+`qwen2.5vl:7b`, `bge-large`) get pulled if they aren't already present. To
+just pull them without doing anything else, e.g. to pre-warm before your
+first run:
+
+```powershell
+# PowerShell
+./scripts/pull-models.ps1
+```
+
+```bash
+# bash
+./scripts/pull-models.sh
+```
 
 ## Run
 
@@ -72,13 +84,15 @@ more piece sits on top of this core, off by default:
 ./scripts/run.sh
 ```
 
-Checks Docker and Ollama are actually installed (and Docker is running),
-creates `.env` from `.env.example` on first run if it doesn't exist yet,
+Checks Docker is installed and running, requires `.env` to already exist
+(fails with instructions if not — see [Prerequisites](#prerequisites)),
+pulls whichever configured Ollama models aren't already installed,
 generates the HTTPS cert if needed, asks whether to start the optional
 speech service (in the background — see below, not a visible window),
 then builds and starts everything. Safe to re-run any time — every step
-is a no-op if it already happened. Pass `-Force`/`--force` to rotate the
-HTTPS cert even if a valid one exists.
+is a no-op if it already happened (existing models/cert are detected and
+skipped). Pass `-Force`/`--force` to rotate the HTTPS cert even if a valid
+one exists.
 
 The rest of this section is what that script automates, spelled out for
 manual use, and to explain what each piece is actually doing.
@@ -89,13 +103,9 @@ manual use, and to explain what each piece is actually doing.
 terminate TLS with, so this has to happen before the first `docker compose
 up` — after that it's a no-op on every subsequent run (see step 3).
 
-```bash
-cp .env.example .env        # tweak if your Ollama isn't on the default port
-```
-
-- In `.env`, set `DOMAIN_NAME` (defaults to `localhost`) — this becomes the
-  cert's subject and nginx's `server_name`. Use a LAN hostname if other
-  devices need access, e.g. `DOMAIN_NAME=docstore.home`.
+- In `.env` (see [Prerequisites](#prerequisites)), `DOMAIN_NAME` (defaults
+  to `localhost`) becomes the cert's subject and nginx's `server_name`. Use
+  a LAN hostname if other devices need access, e.g. `DOMAIN_NAME=docstore.home`.
 - If 80/443 are already taken on your host (common on Windows — IIS, Skype,
   VMware, etc. often grab 443), also set `HTTP_PORT`/`HTTPS_PORT` in `.env`
   to something free, e.g. `HTTPS_PORT=8443`.

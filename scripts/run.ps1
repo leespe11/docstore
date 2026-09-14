@@ -62,29 +62,63 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Docker OK." -ForegroundColor Green
 
 # ---------------------------------------------------------------------------
-# 2. Ollama
+# 2. .env — required up front (not auto-created): the model-pull step below
+# and the HTTPS cert both read settings from it, so a silently-defaulted
+# .env would mean pulling the wrong models or minting a cert for the wrong
+# domain without you noticing.
+
+Write-Step "Checking for .env"
+if (-not (Test-Path ".env")) {
+    Write-Fail ".env not found. Copy .env.example to .env and configure it (at least DOMAIN_NAME, and OLLAMA_BASE_URL if Ollama isn't on the default port), then re-run this script."
+    exit 1
+}
+Write-Host ".env found." -ForegroundColor Green
+
+# ---------------------------------------------------------------------------
+# 3. Ollama — installed, and every model this app is configured to use
+# (per .env, falling back to backend/app/config.py's defaults) actually
+# pulled. Mirrors scripts/pull-models.ps1 rather than shelling out to it,
+# since it needs to skip models that are already present instead of always
+# re-pulling.
 
 Write-Step "Checking for Ollama"
 $ollamaCmd = Get-Command ollama -ErrorAction SilentlyContinue
 if (-not $ollamaCmd) {
-    Write-Fail "Ollama not found on PATH. Install it (needed for the LLMs this app calls out to) and pull the models: https://ollama.com/download - then ./scripts/pull-models.ps1"
+    Write-Fail "Ollama not found on PATH. Install it (needed for the LLMs this app calls out to): https://ollama.com/download"
     exit 1
 }
 Write-Host "Ollama OK." -ForegroundColor Green
 
-# ---------------------------------------------------------------------------
-# 3. .env
+$llmModel = Get-EnvValue "OLLAMA_LLM_MODEL" "qwen2.5:14b"
+$visionModel = Get-EnvValue "OLLAMA_VISION_MODEL" "qwen2.5vl:7b"
+$embedModel = Get-EnvValue "OLLAMA_EMBED_MODEL" "bge-large"
+$extractModel = Get-EnvValue "OLLAMA_EXTRACT_MODEL" ""
 
-Write-Step "Checking for .env"
-if (-not (Test-Path ".env")) {
-    if (-not (Test-Path ".env.example")) {
-        Write-Fail ".env.example is missing - can't create a default .env from it."
-        exit 1
+$neededModels = @($llmModel, $visionModel, $embedModel)
+if ($extractModel -and $extractModel -ne $llmModel) {
+    $neededModels += $extractModel
+}
+
+# `ollama list` shows an explicit :latest tag even for models pulled
+# without one (e.g. "bge-large" pulls as "bge-large:latest") - strip that
+# suffix on both sides before comparing so an untagged config value still
+# matches an already-pulled model.
+$installedModels = @(ollama list | Select-Object -Skip 1 | ForEach-Object {
+    ($_ -split '\s+')[0] -replace ':latest$', ''
+})
+
+foreach ($m in $neededModels) {
+    $mNorm = $m -replace ':latest$', ''
+    if ($installedModels -contains $mNorm) {
+        Write-Host "$m already installed." -ForegroundColor Green
+    } else {
+        Write-Host "Pulling $m (not installed yet)..." -ForegroundColor Cyan
+        ollama pull $m
+        if ($LASTEXITCODE -ne 0) {
+            Write-Fail "ollama pull $m failed (see above)."
+            exit 1
+        }
     }
-    Copy-Item ".env.example" ".env"
-    Write-Host "Created .env from .env.example (defaults: DOMAIN_NAME=localhost, HTTPS_PORT=443). Edit it any time - re-run this script to pick up changes." -ForegroundColor Yellow
-} else {
-    Write-Host ".env already exists, leaving it as-is." -ForegroundColor Green
 }
 
 # ---------------------------------------------------------------------------
